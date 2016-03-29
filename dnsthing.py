@@ -1,57 +1,12 @@
 #!/usr/bin/python
 
-import os
 import argparse
 import docker
 import logging
-import json
 import subprocess
-import tempfile
-import signal
-import atexit
-import time
 
 
 LOG = logging.getLogger(__name__)
-
-
-class dnsmasqManager (object):
-    def __init__(self, hostsfile, port=None):
-        extra_args = w[]
-
-        if port is not None:
-            extra_args += ['--port', str(port)]
-
-        self.hostsfile = hos1tsfile
-        self._started = False
-
-    def start(self):
-        LOG.info('starting dnsmasq')
-
-        atexit.register(self.cleanup)
-        self.dnsmasq = subprocess.Popen([
-            'dnsmasq', '--no-hosts', '--no-resolv', '-d',
-            '--addn-hosts', self.hostsfile,
-        ] + extra_args)
-
-        self._started = True
-
-    def cleanup(self):
-        if self._started:
-            self.stop()
-
-    def signal(self, sig):
-        if not self._started:
-
-        self.dnsmasq.send_signal(sig)
-
-    def reload(self):
-        self.signal(signal.SIGHUP)
-
-    def stop(self):1G
-        self.dnsmasq.terminate()
-        self.retcode = self.dnsmasq.wait()
-        self._started = False
 
 
 class hostRegistry (object):
@@ -72,7 +27,7 @@ class hostRegistry (object):
             LOG.debug('event: %s', event)
             if event['Type'] != 'container':
                 LOG.debug('ignoring non-container event (%s:%s)',
-                         event['Type'], event['Action'])
+                          event['Type'], event['Action'])
                 continue
 
             try:
@@ -87,8 +42,8 @@ class hostRegistry (object):
                          event['Action'], event['id'])
                 handler(event, container)
             else:
-                LOG.info('not handling %s event for %s',
-                         event['Action'], event['id'])
+                LOG.debug('not handling %s event for %s',
+                          event['Action'], event['id'])
 
     def handle_start(self, event, container):
         self.register(container)
@@ -110,6 +65,11 @@ class hostRegistry (object):
         if name in self.byname:
             LOG.warn('not registering %s (%s): name already registered to %s',
                      name, container['Id'], self.byname[name])
+            return
+
+        if container['NetworkSettings'].get('Networks') is None:
+            LOG.warn('container %s (%s) has no network information',
+                     name, container['Id'])
             return
 
         this = {
@@ -144,14 +104,12 @@ class hostRegistry (object):
 
     def update_hosts(self):
         LOG.info('writing hosts to %s', self.hostsfile)
-        self.hostsfile.seek(0)
 
-        for name, data in self.byname.items():
-            for nwname, address in data['networks'].items():
-                self.hostsfile.write('%s %s.%s.%s\n' % (
-                                     address, name, nwname, self.domain))
-
-        self.hostsfile.flush()
+        with open(self.hostsfile, 'w') as fd:
+            for name, data in self.byname.items():
+                for nwname, address in data['networks'].items():
+                    fd.write('%s %s.%s.%s\n' % (
+                        address, name, nwname, self.domain))
 
         if self.onupdate:
             self.onupdate()
@@ -159,7 +117,7 @@ class hostRegistry (object):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--verbose',
+    p.add_argument('--verbose', '-v',
                    action='store_const',
                    const='INFO',
                    dest='loglevel')
@@ -169,22 +127,37 @@ def parse_args():
                    dest='loglevel')
     p.add_argument('--domain', '-d',
                    default='docker')
-    p.add_argument('--port', '-p')
+    p.add_argument('--hostsfile', '-H',
+                   default='./hosts')
+    p.add_argument('--update-command', '-c')
 
     p.set_defaults(loglevel='WARN')
     return p.parse_args()
 
 
+def run_external_command(cmd):
+    def runner():
+        LOG.info('running external command: %s', cmd)
+        subprocess.call(cmd, shell=True)
+
+    return runner
+
+
 def main():
     args = parse_args()
     logging.basicConfig(level=args.loglevel)
+    registry_args = {}
+
+    if args.update_command:
+        run_update_command = run_external_command(args.update_command)
+        registry_args['onupdate'] = run_update_command
 
     client = docker.Client()
-    with tempfile.NamedTemporaryFile(prefix='hosts') as fd:
-        dnsmasq = dnsmasqManager(hostsfile=fd.name, port=args.port)
-        registry = hostRegistry(client, fd,
-                                onupdate=dnsmasq.reload)
-        registry.run()
+    registry = hostRegistry(client,
+                            args.hostsfile,
+                            **registry_args)
+
+    registry.run()
 
 
 if __name__ == '__main__':
