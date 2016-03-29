@@ -4,6 +4,7 @@ After=docker.service
 
 [Service]
 ExecStart=/usr/local/bin/dnsthing -c 'systemctl restart dnsmasq@infra' -H /run/infra/hosts/docker --verbose
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
