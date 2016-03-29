@@ -21,8 +21,11 @@ class hostRegistry (object):
         super(hostRegistry, self).__init__()
 
     def run(self):
+        # Register any existing containers first
         self.scan()
 
+        # Watch for docker events and register/unregister
+        # addresses as containers are started and stopped.
         for event in self.client.events(decode=True):
             LOG.debug('event: %s', event)
             if event['Type'] != 'container':
@@ -52,12 +55,18 @@ class hostRegistry (object):
         self.unregister(container)
 
     def scan(self):
+        '''Register any existing containers'''
+
         for container in self.client.containers():
             container = self.client.inspect_container(container['Id'])
             LOG.debug('scan: %s', container)
             self.register(container)
 
     def register(self, container):
+        '''Register a container.  Iterate over all of the networks to
+        which this container is attached, and for each network add the
+        name <container_name>.<network_name>.<domnain>.'''
+
         name = container['Name']
         if name.startswith('/'):
             name = name[1:]
@@ -90,6 +99,8 @@ class hostRegistry (object):
         self.update_hosts()
 
     def unregister(self, container):
+        '''Remove all entries associated with a given container.'''
+
         name = container['Name']
         if name.startswith('/'):
             name = name[1:]
@@ -103,6 +114,9 @@ class hostRegistry (object):
         self.update_hosts()
 
     def update_hosts(self):
+        '''Write out the hosts file and (optionally) trigger the
+        onupdate callback.'''
+
         LOG.info('writing hosts to %s', self.hostsfile)
 
         with open(self.hostsfile, 'w') as fd:
