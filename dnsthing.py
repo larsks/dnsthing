@@ -166,7 +166,11 @@ def main():
         run_update_command = run_external_command(args.update_command)
         registry_args['onupdate'] = run_update_command
 
-    client = docker.Client()
+    try:
+        client = docker.client.AutoVersionClient()
+    except AttributeError:
+        client = docker.client.APIClient()
+
     registry = hostRegistry(client,
                             args.hostsfile,
                             **registry_args)
