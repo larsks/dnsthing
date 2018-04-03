@@ -85,6 +85,7 @@ class hostRegistry (object):
             'name': name,
             'id': container['Id'],
             'networks': {},
+            'hostname': container['Config']['Hostname']
         }
 
         self.byid[container['Id']] = this
@@ -105,9 +106,12 @@ class hostRegistry (object):
         if name.startswith('/'):
             name = name[1:]
 
+        hostname = container['Config']['Hostname']
+
         if container['Id'] in self.byid:
             del self.byid[container['Id']]
             del self.byname[name]
+            del self.byname[hostname]
             LOG.info('unregistered all entries for container %s (%s)',
                      name, container['Id'])
 
@@ -121,7 +125,11 @@ class hostRegistry (object):
 
         with open(self.hostsfile, 'w') as fd:
             for name, data in self.byname.items():
+                byhost = False
                 for nwname, address in data['networks'].items():
+                    if byhost == False:
+                        fd.write('%s %s.%s\n' % (address, data['hostname'], self.domain))
+                        byhost = True
                     fd.write('%s %s.%s.%s\n' % (
                         address, name, nwname, self.domain))
 
