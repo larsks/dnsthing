@@ -42,6 +42,8 @@ func main() {
 	// Parse command line arguments
 	domain := pflag.StringP("domain", "d", "", "domain to append to container names")
 	multiNet := pflag.BoolP("multiple-networks", "m", false, "create entries for all networks")
+	updateCommand := pflag.StringP("update-command", "u", "", "command to run after hostfile updates")
+	minInterval := pflag.DurationP("minimum-update-interval", "i", 0, "minimum time between hostfile updates")
 	pflag.Parse()
 
 	if len(pflag.Args()) != 1 {
@@ -51,9 +53,11 @@ func main() {
 	}
 
 	cfg := eventclient.Config{
-		HostsPath: pflag.Args()[0],
-		Domain:    *domain,
-		MultiNet:  *multiNet,
+		HostsPath:             pflag.Args()[0],
+		Domain:                *domain,
+		MultiNet:              *multiNet,
+		UpdateCommand:         *updateCommand,
+		MinimumUpdateInterval: *minInterval,
 	}
 
 	// Create context with signal handling

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os/exec"
+	"sync"
+	"time"
 
 	"github.com/larsks/dnsthing/hostfile"
 	"github.com/moby/moby/client"
@@ -20,9 +23,132 @@ type DockerClient interface {
 
 // Config holds configuration for the event client
 type Config struct {
-	HostsPath string
-	Domain    string
-	MultiNet  bool
+	HostsPath             string
+	Domain                string
+	MultiNet              bool
+	UpdateCommand         string
+	MinimumUpdateInterval time.Duration
+}
+
+// writeManager handles throttled writes to the hostfile and update command execution
+type writeManager struct {
+	hf                    *hostfile.Hostfile
+	updateCommand         string
+	minimumUpdateInterval time.Duration
+	mu                    sync.Mutex
+	lastWrite             time.Time
+	pendingWrite          bool
+	timer                 *time.Timer
+	ctx                   context.Context
+}
+
+// newWriteManager creates a new write manager
+func newWriteManager(ctx context.Context, hf *hostfile.Hostfile, updateCommand string, minInterval time.Duration) *writeManager {
+	return &writeManager{
+		hf:                    hf,
+		updateCommand:         updateCommand,
+		minimumUpdateInterval: minInterval,
+		ctx:                   ctx,
+	}
+}
+
+// executeUpdateCommand runs the update command using /bin/sh
+func (wm *writeManager) executeUpdateCommand() {
+	if wm.updateCommand == "" {
+		return
+	}
+
+	cmd := exec.CommandContext(wm.ctx, "/bin/sh", "-c", wm.updateCommand)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("ERROR: update command failed: %v", err)
+		if len(output) > 0 {
+			log.Printf("command output: %s", string(output))
+		}
+	} else {
+		log.Printf("update command executed successfully")
+		if len(output) > 0 {
+			log.Printf("command output: %s", string(output))
+		}
+	}
+}
+
+// requestWrite requests a write to the hostfile, respecting the minimum update interval
+func (wm *writeManager) requestWrite() error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	// If no minimum interval, write immediately
+	if wm.minimumUpdateInterval == 0 {
+		return wm.writeNow()
+	}
+
+	// Check if enough time has passed since last write
+	timeSinceLastWrite := time.Since(wm.lastWrite)
+	if timeSinceLastWrite >= wm.minimumUpdateInterval {
+		// Enough time has passed, write immediately
+		return wm.writeNow()
+	}
+
+	// Not enough time has passed, schedule a write
+	wm.pendingWrite = true
+
+	// Cancel existing timer if any
+	if wm.timer != nil {
+		wm.timer.Stop()
+	}
+
+	// Calculate when the next write should happen
+	timeUntilNextWrite := wm.minimumUpdateInterval - timeSinceLastWrite
+
+	// Schedule the write
+	wm.timer = time.AfterFunc(timeUntilNextWrite, func() {
+		wm.mu.Lock()
+		defer wm.mu.Unlock()
+
+		if wm.pendingWrite {
+			if err := wm.writeNow(); err != nil {
+				log.Printf("ERROR: scheduled write failed: %v", err)
+			}
+		}
+	})
+
+	log.Printf("write scheduled in %v", timeUntilNextWrite)
+	return nil
+}
+
+// writeNow performs the actual write (must be called with mutex held)
+func (wm *writeManager) writeNow() error {
+	if err := wm.hf.Write(); err != nil {
+		return err
+	}
+
+	wm.lastWrite = time.Now()
+	wm.pendingWrite = false
+
+	// Execute update command in background
+	go wm.executeUpdateCommand()
+
+	return nil
+}
+
+// flush ensures any pending writes are completed
+func (wm *writeManager) flush() error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+
+	// Cancel any pending timer
+	if wm.timer != nil {
+		wm.timer.Stop()
+		wm.timer = nil
+	}
+
+	// If there's a pending write, do it now
+	if wm.pendingWrite {
+		return wm.writeNow()
+	}
+
+	return nil
 }
 
 // getContainerIPs retrieves all IP addresses for a container, organized by network name
@@ -85,7 +211,7 @@ func constructHostnames(containerName, domain string, ips map[string]string, mul
 }
 
 // syncRunningContainers adds host entries for all currently running containers
-func syncRunningContainers(ctx context.Context, cli DockerClient, hf *hostfile.Hostfile, domain string, multiNet bool) error {
+func syncRunningContainers(ctx context.Context, cli DockerClient, hf *hostfile.Hostfile, wm *writeManager, domain string, multiNet bool) error {
 	result, err := cli.ContainerList(ctx, client.ContainerListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list containers: %w", err)
@@ -126,7 +252,7 @@ func syncRunningContainers(ctx context.Context, cli DockerClient, hf *hostfile.H
 	}
 
 	// Write all changes to disk
-	if err := hf.Write(); err != nil {
+	if err := wm.requestWrite(); err != nil {
 		return fmt.Errorf("failed to write hostfile: %w", err)
 	}
 
@@ -138,6 +264,7 @@ func handleContainerStart(
 	ctx context.Context,
 	cli DockerClient,
 	hf *hostfile.Hostfile,
+	wm *writeManager,
 	containerID string,
 	containerName string,
 	domain string,
@@ -165,7 +292,7 @@ func handleContainerStart(
 	}
 
 	// Write to disk
-	if err := hf.Write(); err != nil {
+	if err := wm.requestWrite(); err != nil {
 		return fmt.Errorf("failed to write hostfile: %w", err)
 	}
 
@@ -178,6 +305,7 @@ func handleContainerDie(
 	ctx context.Context,
 	cli DockerClient,
 	hf *hostfile.Hostfile,
+	wm *writeManager,
 	containerID string,
 	containerName string,
 	domain string,
@@ -216,7 +344,7 @@ func handleContainerDie(
 	}
 
 	// Write to disk
-	if err := hf.Write(); err != nil {
+	if err := wm.requestWrite(); err != nil {
 		return fmt.Errorf("failed to write hostfile: %w", err)
 	}
 
@@ -235,8 +363,18 @@ func Run(
 	hf *hostfile.Hostfile,
 	cfg Config,
 ) error {
+	// Create write manager
+	wm := newWriteManager(ctx, hf, cfg.UpdateCommand, cfg.MinimumUpdateInterval)
+
+	// Ensure pending writes are flushed on exit
+	defer func() {
+		if err := wm.flush(); err != nil {
+			log.Printf("ERROR: failed to flush pending writes: %v", err)
+		}
+	}()
+
 	// Sync all currently running containers
-	if err := syncRunningContainers(ctx, cli, hf, cfg.Domain, cfg.MultiNet); err != nil {
+	if err := syncRunningContainers(ctx, cli, hf, wm, cfg.Domain, cfg.MultiNet); err != nil {
 		return fmt.Errorf("failed to sync running containers: %w", err)
 	}
 
@@ -256,13 +394,13 @@ func Run(
 
 			switch msg.Action {
 			case "start":
-				err = handleContainerStart(ctx, cli, hf, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
+				err = handleContainerStart(ctx, cli, hf, wm, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
 				if err != nil {
 					log.Fatalf("ERROR: %v", err)
 				}
 
 			case "die":
-				err = handleContainerDie(ctx, cli, hf, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
+				err = handleContainerDie(ctx, cli, hf, wm, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
 				if err != nil {
 					log.Fatalf("ERROR: %v", err)
 				}

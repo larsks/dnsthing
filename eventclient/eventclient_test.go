@@ -6,7 +6,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/larsks/dnsthing/hostfile"
 	"github.com/moby/moby/api/types/container"
@@ -377,6 +379,8 @@ func TestSyncRunningContainers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hf, _ := createTempHostfile(t)
+			ctx := context.Background()
+			wm := newWriteManager(ctx, hf, "", 0) // No update command, no throttling for tests
 
 			mock := &mockDockerClient{
 				listFunc: func(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error) {
@@ -393,7 +397,7 @@ func TestSyncRunningContainers(t *testing.T) {
 				},
 			}
 
-			err := syncRunningContainers(context.Background(), mock, hf, tt.domain, tt.multiNet)
+			err := syncRunningContainers(ctx, mock, hf, wm, tt.domain, tt.multiNet)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("syncRunningContainers() error = %v, wantErr %v", err, tt.wantErr)
@@ -509,6 +513,8 @@ func TestHandleContainerStart(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hf, _ := createTempHostfile(t)
+			ctx := context.Background()
+			wm := newWriteManager(ctx, hf, "", 0) // No update command, no throttling for tests
 
 			mock := &mockDockerClient{
 				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
@@ -519,7 +525,7 @@ func TestHandleContainerStart(t *testing.T) {
 				},
 			}
 
-			err := handleContainerStart(context.Background(), mock, hf, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
+			err := handleContainerStart(ctx, mock, hf, wm, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("handleContainerStart() error = %v, wantErr %v", err, tt.wantErr)
@@ -551,16 +557,16 @@ func TestHandleContainerStart(t *testing.T) {
 
 func TestHandleContainerDie(t *testing.T) {
 	tests := []struct {
-		name            string
-		containerID     string
-		containerName   string
-		domain          string
-		multiNet        bool
-		initialHosts    map[string]string
-		mockInspect     client.ContainerInspectResult
-		mockErr         error
+		name               string
+		containerID        string
+		containerName      string
+		domain             string
+		multiNet           bool
+		initialHosts       map[string]string
+		mockInspect        client.ContainerInspectResult
+		mockErr            error
 		wantRemainingHosts map[string]string
-		wantErr         bool
+		wantErr            bool
 	}{
 		{
 			name:          "remove single network entry",
@@ -663,6 +669,8 @@ func TestHandleContainerDie(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			hf, _ := createTempHostfile(t)
+			ctx := context.Background()
+			wm := newWriteManager(ctx, hf, "", 0) // No update command, no throttling for tests
 
 			// Populate initial hosts
 			for hostname, ip := range tt.initialHosts {
@@ -683,7 +691,7 @@ func TestHandleContainerDie(t *testing.T) {
 				},
 			}
 
-			err := handleContainerDie(context.Background(), mock, hf, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
+			err := handleContainerDie(ctx, mock, hf, wm, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("handleContainerDie() error = %v, wantErr %v", err, tt.wantErr)
@@ -716,5 +724,300 @@ func TestHandleContainerDie(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWriteManagerNoThrottling(t *testing.T) {
+	hf, _ := createTempHostfile(t)
+	ctx := context.Background()
+	wm := newWriteManager(ctx, hf, "", 0) // No throttling
+
+	// Add a host and request write
+	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+
+	// Write should happen immediately
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("requestWrite failed: %v", err)
+	}
+
+	// Verify the host was written
+	if err := hf.Read(); err != nil {
+		t.Fatalf("failed to read hostfile: %v", err)
+	}
+
+	ip, err := hf.LookupHost("test1")
+	if err != nil {
+		t.Errorf("host not found after write: %v", err)
+	} else if ip != "192.168.1.1" {
+		t.Errorf("got IP %s, want 192.168.1.1", ip)
+	}
+}
+
+func TestWriteManagerWithThrottling(t *testing.T) {
+	hf, _ := createTempHostfile(t)
+	ctx := context.Background()
+	wm := newWriteManager(ctx, hf, "", 200*time.Millisecond) // 200ms throttle
+
+	// First write should be immediate
+	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+
+	start := time.Now()
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("first requestWrite failed: %v", err)
+	}
+	firstWriteDuration := time.Since(start)
+
+	// First write should be very fast (< 50ms)
+	if firstWriteDuration > 50*time.Millisecond {
+		t.Errorf("first write took %v, expected < 50ms", firstWriteDuration)
+	}
+
+	// Second write should be delayed
+	if err := hf.AddHost("test2", "192.168.1.2"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+
+	secondWriteStart := time.Now()
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("second requestWrite failed: %v", err)
+	}
+	immediateReturnDuration := time.Since(secondWriteStart)
+
+	// The second write should have been scheduled (returned quickly)
+	if immediateReturnDuration > 50*time.Millisecond {
+		t.Errorf("requestWrite should return immediately, took %v", immediateReturnDuration)
+	}
+
+	// Wait for the scheduled write to complete
+	time.Sleep(250 * time.Millisecond)
+
+	// Verify both hosts were written
+	if err := hf.Read(); err != nil {
+		t.Fatalf("failed to read hostfile: %v", err)
+	}
+
+	if _, err := hf.LookupHost("test1"); err != nil {
+		t.Errorf("test1 not found: %v", err)
+	}
+	if _, err := hf.LookupHost("test2"); err != nil {
+		t.Errorf("test2 not found after scheduled write: %v", err)
+	}
+}
+
+func TestWriteManagerBatching(t *testing.T) {
+	hf, _ := createTempHostfile(t)
+	ctx := context.Background()
+	wm := newWriteManager(ctx, hf, "", 300*time.Millisecond) // 300ms throttle
+
+	// First write - immediate
+	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+
+	// Add multiple hosts rapidly (within throttle interval)
+	time.Sleep(50 * time.Millisecond)
+	if err := hf.AddHost("test2", "192.168.1.2"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if err := hf.AddHost("test3", "192.168.1.3"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("third write failed: %v", err)
+	}
+
+	// Wait for scheduled write
+	time.Sleep(350 * time.Millisecond)
+
+	// Verify all hosts were written
+	if err := hf.Read(); err != nil {
+		t.Fatalf("failed to read hostfile: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		hostname := "test" + string(rune('0'+i))
+		if _, err := hf.LookupHost(hostname); err != nil {
+			t.Errorf("%s not found: %v", hostname, err)
+		}
+	}
+}
+
+func TestWriteManagerUpdateCommand(t *testing.T) {
+	hf, hostsPath := createTempHostfile(t)
+	ctx := context.Background()
+
+	// Create a temp file for command output
+	outputPath := filepath.Join(filepath.Dir(hostsPath), "output.txt")
+	defer os.Remove(outputPath)
+
+	// Use a command that writes to the output file
+	updateCmd := "echo 'updated' >> " + outputPath
+	wm := newWriteManager(ctx, hf, updateCmd, 0)
+
+	// Request a write
+	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("requestWrite failed: %v", err)
+	}
+
+	// Wait for background command to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify command was executed
+	output, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("failed to read command output: %v", err)
+	}
+
+	if !strings.Contains(string(output), "updated") {
+		t.Errorf("update command was not executed, output: %s", string(output))
+	}
+}
+
+func TestWriteManagerUpdateCommandFailure(t *testing.T) {
+	hf, _ := createTempHostfile(t)
+	ctx := context.Background()
+
+	// Use a command that will fail
+	updateCmd := "/bin/sh -c 'exit 1'"
+	wm := newWriteManager(ctx, hf, updateCmd, 0)
+
+	// Request a write - should not fail even though command fails
+	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("requestWrite should not fail when update command fails: %v", err)
+	}
+
+	// Wait for background command to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify host was still written despite command failure
+	if err := hf.Read(); err != nil {
+		t.Fatalf("failed to read hostfile: %v", err)
+	}
+	if _, err := hf.LookupHost("test"); err != nil {
+		t.Errorf("host should be written even when update command fails: %v", err)
+	}
+}
+
+func TestWriteManagerNoUpdateCommand(t *testing.T) {
+	hf, _ := createTempHostfile(t)
+	ctx := context.Background()
+	wm := newWriteManager(ctx, hf, "", 0) // No update command
+
+	// Request a write
+	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("requestWrite failed: %v", err)
+	}
+
+	// Verify host was written
+	if err := hf.Read(); err != nil {
+		t.Fatalf("failed to read hostfile: %v", err)
+	}
+	if _, err := hf.LookupHost("test"); err != nil {
+		t.Errorf("host not found: %v", err)
+	}
+}
+
+func TestWriteManagerFlush(t *testing.T) {
+	hf, _ := createTempHostfile(t)
+	ctx := context.Background()
+	wm := newWriteManager(ctx, hf, "", 500*time.Millisecond) // Long throttle
+
+	// First write - immediate
+	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+
+	// Second write - will be pending
+	time.Sleep(50 * time.Millisecond)
+	if err := hf.AddHost("test2", "192.168.1.2"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("second write failed: %v", err)
+	}
+
+	// Flush immediately (don't wait for timer)
+	if err := wm.flush(); err != nil {
+		t.Fatalf("flush failed: %v", err)
+	}
+
+	// Verify both hosts were written immediately
+	if err := hf.Read(); err != nil {
+		t.Fatalf("failed to read hostfile: %v", err)
+	}
+
+	if _, err := hf.LookupHost("test1"); err != nil {
+		t.Errorf("test1 not found: %v", err)
+	}
+	if _, err := hf.LookupHost("test2"); err != nil {
+		t.Errorf("test2 not found after flush: %v", err)
+	}
+}
+
+func TestWriteManagerFlushNoPending(t *testing.T) {
+	hf, _ := createTempHostfile(t)
+	ctx := context.Background()
+	wm := newWriteManager(ctx, hf, "", 100*time.Millisecond)
+
+	// Flush with no pending writes - should not error
+	if err := wm.flush(); err != nil {
+		t.Errorf("flush with no pending writes should not error: %v", err)
+	}
+}
+
+func TestWriteManagerContextCancellation(t *testing.T) {
+	hf, hostsPath := createTempHostfile(t)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Create a temp file for command output
+	outputPath := filepath.Join(filepath.Dir(hostsPath), "output.txt")
+	defer os.Remove(outputPath)
+
+	// Use a long-running command that should be cancelled
+	updateCmd := "sleep 10 && echo 'should not appear' >> " + outputPath
+	wm := newWriteManager(ctx, hf, updateCmd, 0)
+
+	// Start a write
+	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
+		t.Fatalf("failed to add host: %v", err)
+	}
+	if err := wm.requestWrite(); err != nil {
+		t.Fatalf("requestWrite failed: %v", err)
+	}
+
+	// Cancel context immediately
+	cancel()
+
+	// Wait a bit
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify command was cancelled (file should not exist or be empty)
+	output, err := os.ReadFile(outputPath)
+	if err == nil && strings.Contains(string(output), "should not appear") {
+		t.Errorf("command should have been cancelled, but output was written: %s", string(output))
 	}
 }
