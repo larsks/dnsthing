@@ -152,7 +152,14 @@ func (hf *Hostfile) Read() error {
 // Write writes the hosts file to disk, replacing any existing content.
 // Uses an atomic write pattern (write to temp file, then rename) to prevent
 // corruption. Entries are written in sorted order for deterministic output.
+// Preserves the permissions of the original file if it exists.
 func (hf *Hostfile) Write() error {
+	// Get permissions from existing file, or use default
+	var perm os.FileMode = 0644 // Default permissions
+	if info, err := os.Stat(hf.path); err == nil {
+		perm = info.Mode().Perm()
+	}
+
 	// Create temp file in same directory for atomic write
 	dir := filepath.Dir(hf.path)
 	tmpFile, err := os.CreateTemp(dir, ".hostfile-*.tmp")
@@ -197,6 +204,12 @@ func (hf *Hostfile) Write() error {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 	tmpFile = nil // Prevent deferred cleanup
+
+	// Set permissions to match original file
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("failed to set permissions: %w", err)
+	}
 
 	// Atomic rename
 	if err := os.Rename(tmpPath, hf.path); err != nil {

@@ -735,3 +735,108 @@ func TestIntegrationModifyWriteRead(t *testing.T) {
 		t.Errorf("new.example.com = %s, want 172.16.0.1", ip)
 	}
 }
+
+func TestWritePreservesPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "hosts")
+
+	// Test different permission modes
+	tests := []struct {
+		name string
+		perm os.FileMode
+	}{
+		{
+			name: "read-write for owner only",
+			perm: 0600,
+		},
+		{
+			name: "read-write for owner, read for group and others",
+			perm: 0644,
+		},
+		{
+			name: "read-write for owner and group, read for others",
+			perm: 0664,
+		},
+		{
+			name: "read-write-execute for owner, read-execute for others",
+			perm: 0755,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create initial file with specific permissions
+			initialContent := "127.0.0.1\tlocalhost\n"
+			if err := os.WriteFile(tmpFile, []byte(initialContent), tt.perm); err != nil {
+				t.Fatalf("Failed to create initial file: %v", err)
+			}
+
+			// Explicitly set permissions (os.WriteFile respects umask)
+			if err := os.Chmod(tmpFile, tt.perm); err != nil {
+				t.Fatalf("Failed to chmod initial file: %v", err)
+			}
+
+			// Verify initial permissions
+			info, err := os.Stat(tmpFile)
+			if err != nil {
+				t.Fatalf("Failed to stat initial file: %v", err)
+			}
+			if info.Mode().Perm() != tt.perm {
+				t.Fatalf("Initial permissions = %o, want %o", info.Mode().Perm(), tt.perm)
+			}
+
+			// Modify and write the hostfile
+			hf := NewHostfile(tmpFile)
+			if err := hf.Read(); err != nil {
+				t.Fatalf("Failed to read hostfile: %v", err)
+			}
+
+			if err := hf.AddHost("example.com", "192.168.1.1"); err != nil {
+				t.Fatalf("Failed to add host: %v", err)
+			}
+
+			if err := hf.Write(); err != nil {
+				t.Fatalf("Failed to write hostfile: %v", err)
+			}
+
+			// Verify permissions are preserved
+			info, err = os.Stat(tmpFile)
+			if err != nil {
+				t.Fatalf("Failed to stat written file: %v", err)
+			}
+
+			if info.Mode().Perm() != tt.perm {
+				t.Errorf("Write() changed permissions from %o to %o, should preserve permissions", tt.perm, info.Mode().Perm())
+			}
+
+			// Cleanup for next test
+			os.Remove(tmpFile)
+		})
+	}
+}
+
+func TestWriteDefaultPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "hosts")
+
+	// Create new hostfile without existing file
+	hf := NewHostfile(tmpFile)
+	if err := hf.AddHost("localhost", "127.0.0.1"); err != nil {
+		t.Fatalf("Failed to add host: %v", err)
+	}
+
+	if err := hf.Write(); err != nil {
+		t.Fatalf("Failed to write hostfile: %v", err)
+	}
+
+	// Verify default permissions (0644)
+	info, err := os.Stat(tmpFile)
+	if err != nil {
+		t.Fatalf("Failed to stat written file: %v", err)
+	}
+
+	expectedPerm := os.FileMode(0644)
+	if info.Mode().Perm() != expectedPerm {
+		t.Errorf("Write() created file with permissions %o, want %o (default)", info.Mode().Perm(), expectedPerm)
+	}
+}
