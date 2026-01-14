@@ -44,6 +44,7 @@ func main() {
 	multiNet := pflag.BoolP("multiple-networks", "m", false, "create entries for all networks")
 	updateCommand := pflag.StringP("update-command", "u", "", "command to run after hostfile updates")
 	minInterval := pflag.DurationP("minimum-update-interval", "i", 0, "minimum time between hostfile updates")
+	replace := pflag.BoolP("replace", "r", false, "replace hosts file (ignore existing entries)")
 	pflag.Parse()
 
 	if len(pflag.Args()) != 1 {
@@ -74,8 +75,12 @@ func main() {
 
 	// Initialize hostfile
 	hf := hostfile.NewHostfile(cfg.HostsPath)
-	if err := hf.Read(); err != nil {
-		log.Printf("WARNING: could not read hostfile: %v (starting with empty state)", err)
+	if !*replace {
+		if err := hf.Read(); err != nil {
+			log.Printf("WARNING: could not read hostfile: %v (starting with empty state)", err)
+		}
+	} else {
+		log.Printf("replace mode enabled, ignoring existing hostfile entries")
 	}
 
 	// Run the daemon
