@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -210,6 +211,26 @@ func getContainerIPForNetwork(ctx context.Context, cli DockerClient, containerID
 	return name, ipAddr, nil
 }
 
+// getContainerName retrieves the container name by inspecting the container.
+// This function works even if the container has been disconnected from networks,
+// as the container name is a property of the container itself.
+func getContainerName(ctx context.Context, cli DockerClient, containerID string) (string, error) {
+	inspect, err := cli.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect container: %w", err)
+	}
+
+	containerName := inspect.Container.Name
+	// Docker API returns container names with a leading slash
+	containerName = strings.TrimPrefix(containerName, "/")
+
+	if containerName == "" {
+		return "", fmt.Errorf("container has empty name")
+	}
+
+	return containerName, nil
+}
+
 // constructHostnames creates a map of hostnames to IP addresses based on container name,
 // domain, network IPs, and multi-network mode
 func constructHostnames(containerName, domain string, ips map[string]string, multiNet bool) map[string]string {
@@ -367,11 +388,11 @@ func handleNetworkDisconnect(
 	domain string,
 	multiNet bool,
 ) error {
-	// Try to get container name (may fail if container is already removed)
-	containerName, _, err := getContainerIPForNetwork(ctx, cli, containerID, networkName)
+	// Get container name (works even if network is already disconnected)
+	containerName, err := getContainerName(ctx, cli, containerID)
 	if err != nil {
-		// Container may already be removed, log warning and skip
-		log.Printf("WARNING: cannot get container info for network disconnect (may already be removed): %v", err)
+		// Container may be completely removed, skip silently
+		// The container die handler will clean up entries
 		return nil
 	}
 
@@ -410,6 +431,9 @@ func handleNetworkDisconnect(
 }
 
 // handleContainerDie handles container die events by removing all entries for the container
+// Note: ctx, cli, containerID, domain, and multiNet are unused but kept for signature consistency with other event handlers
+//
+//nolint:unparam // unused parameters kept for consistent handler signature
 func handleContainerDie(
 	ctx context.Context,
 	cli DockerClient,

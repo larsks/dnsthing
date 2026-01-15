@@ -831,6 +831,77 @@ func TestGetContainerIPForNetwork(t *testing.T) {
 	}
 }
 
+func TestGetContainerName(t *testing.T) {
+	tests := []struct {
+		name        string
+		containerID string
+		mockResult  client.ContainerInspectResult
+		mockErr     error
+		wantName    string
+		wantErr     bool
+	}{
+		{
+			name:        "container with leading slash",
+			containerID: "abc123",
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/mycontainer",
+				},
+			},
+			wantName: "mycontainer",
+			wantErr:  false,
+		},
+		{
+			name:        "container without leading slash",
+			containerID: "def456",
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "webapp",
+				},
+			},
+			wantName: "webapp",
+			wantErr:  false,
+		},
+		{
+			name:        "container not found",
+			containerID: "missing",
+			mockErr:     errors.New("container not found"),
+			wantErr:     true,
+		},
+		{
+			name:        "container with empty name",
+			containerID: "emptyname",
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "",
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockDockerClient{
+				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+					return tt.mockResult, tt.mockErr
+				},
+			}
+
+			name, err := getContainerName(context.Background(), mock, tt.containerID)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("getContainerName() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if !tt.wantErr && name != tt.wantName {
+				t.Errorf("getContainerName() = %v, want %v", name, tt.wantName)
+			}
+		})
+	}
+}
+
 func TestHandleNetworkConnect(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -1142,6 +1213,30 @@ func TestHandleNetworkDisconnect(t *testing.T) {
 			existingHosts: map[string]string{},
 			wantHosts:     map[string]string{},
 			wantErr:       false, // Should handle missing entry gracefully
+		},
+		{
+			name:        "container disconnected from network - should still remove entry",
+			containerID: "stillalive",
+			networkName: "customnet",
+			domain:      "",
+			multiNet:    true,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/webapp",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.5",
+						// "customnet" is NOT in the list (already disconnected)
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"webapp.customnet": "172.18.0.10",
+				"webapp.bridge":    "172.17.0.5",
+			},
+			wantHosts: map[string]string{
+				"webapp.bridge": "172.17.0.5", // customnet entry removed
+			},
+			wantErr: false,
 		},
 	}
 
