@@ -1,4 +1,4 @@
-PKG = $(shell grep '^module ' go.mod | cut -f2 -d ' ')
+PKG = $(shell awk '/^module/ {nf=split($$2, parts, "/"); print parts[nf]}' go.mod)
 
 VERSION = $(shell git describe --tags --exact-match 2> /dev/null || echo dev)
 
