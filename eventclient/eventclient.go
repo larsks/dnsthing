@@ -174,6 +174,42 @@ func getContainerIPs(ctx context.Context, cli DockerClient, containerID string) 
 	return ips, nil
 }
 
+// getContainerIPForNetwork retrieves the container name and IP address for a specific network
+func getContainerIPForNetwork(ctx context.Context, cli DockerClient, containerID string, networkName string) (containerName string, ip string, err error) {
+	inspect, err := cli.ContainerInspect(ctx, containerID, client.ContainerInspectOptions{})
+	if err != nil {
+		return "", "", fmt.Errorf("failed to inspect container: %w", err)
+	}
+
+	// Extract container name (remove leading slash if present)
+	name := inspect.Container.Name
+	if len(name) > 0 && name[0] == '/' {
+		name = name[1:]
+	}
+
+	// Look up the specific network
+	if inspect.Container.NetworkSettings == nil || inspect.Container.NetworkSettings.Networks == nil {
+		return "", "", fmt.Errorf("container has no network settings")
+	}
+
+	network, exists := inspect.Container.NetworkSettings.Networks[networkName]
+	if !exists {
+		return "", "", fmt.Errorf("container not connected to network %s", networkName)
+	}
+
+	// Get IPv4 or IPv6 address
+	var ipAddr string
+	if network.IPAddress.IsValid() {
+		ipAddr = network.IPAddress.String()
+	} else if network.GlobalIPv6Address.IsValid() {
+		ipAddr = network.GlobalIPv6Address.String()
+	} else {
+		return "", "", fmt.Errorf("no IP address assigned for network %s", networkName)
+	}
+
+	return name, ipAddr, nil
+}
+
 // constructHostnames creates a map of hostnames to IP addresses based on container name,
 // domain, network IPs, and multi-network mode
 func constructHostnames(containerName, domain string, ips map[string]string, multiNet bool) map[string]string {
@@ -259,36 +295,57 @@ func syncRunningContainers(ctx context.Context, cli DockerClient, hf *hostfile.H
 	return nil
 }
 
-// handleContainerStart handles container start events
-func handleContainerStart(
+// handleNetworkConnect handles network connect events
+func handleNetworkConnect(
 	ctx context.Context,
 	cli DockerClient,
 	hf *hostfile.Hostfile,
 	wm *writeManager,
 	containerID string,
-	containerName string,
+	networkName string,
 	domain string,
 	multiNet bool,
 ) error {
-	// Get container IP addresses
-	ips, err := getContainerIPs(ctx, cli, containerID)
+	// Get container name and IP for this specific network
+	containerName, ip, err := getContainerIPForNetwork(ctx, cli, containerID, networkName)
 	if err != nil {
-		return fmt.Errorf("failed to get IPs for container %s: %w", containerName, err)
+		return fmt.Errorf("failed to get container IP for network %s: %w", networkName, err)
 	}
 
-	if len(ips) == 0 {
-		log.Printf("WARNING: container %s has no IP addresses, skipping", containerName)
-		return nil // Not an error, just skip
-	}
+	if multiNet {
+		// Multi-network mode: create entry for this specific network
+		// Format: containerName.networkName[.domain]
+		hostname := containerName + "." + networkName
+		if domain != "" {
+			hostname = hostname + "." + domain
+		}
 
-	// Construct hostnames
-	hostnames := constructHostnames(containerName, domain, ips, multiNet)
-
-	// Add hosts to file
-	for hostname, ip := range hostnames {
 		if err := hf.AddHost(hostname, ip); err != nil {
 			return fmt.Errorf("failed to add host %s -> %s: %w", hostname, ip, err)
 		}
+
+		log.Printf("added host entry for container %s on network %s: %s -> %s", containerName, networkName, hostname, ip)
+	} else {
+		// Single network mode: only add if container doesn't already have an entry
+		// Format: containerName[.domain]
+		hostname := containerName
+		if domain != "" {
+			hostname = hostname + "." + domain
+		}
+
+		// Check if entry already exists
+		if _, err := hf.LookupHost(hostname); err == nil {
+			// Entry already exists, skip
+			log.Printf("container %s already has entry, skipping network %s", containerName, networkName)
+			return nil
+		}
+
+		// Entry doesn't exist, add it
+		if err := hf.AddHost(hostname, ip); err != nil {
+			return fmt.Errorf("failed to add host %s -> %s: %w", hostname, ip, err)
+		}
+
+		log.Printf("added host entry for container %s: %s -> %s", containerName, hostname, ip)
 	}
 
 	// Write to disk
@@ -296,11 +353,63 @@ func handleContainerStart(
 		return fmt.Errorf("failed to write hostfile: %w", err)
 	}
 
-	log.Printf("added host entries for container %s: %v", containerName, hostnames)
 	return nil
 }
 
-// handleContainerDie handles container die events
+// handleNetworkDisconnect handles network disconnect events
+func handleNetworkDisconnect(
+	ctx context.Context,
+	cli DockerClient,
+	hf *hostfile.Hostfile,
+	wm *writeManager,
+	containerID string,
+	networkName string,
+	domain string,
+	multiNet bool,
+) error {
+	// Try to get container name (may fail if container is already removed)
+	containerName, _, err := getContainerIPForNetwork(ctx, cli, containerID, networkName)
+	if err != nil {
+		// Container may already be removed, log warning and skip
+		log.Printf("WARNING: cannot get container info for network disconnect (may already be removed): %v", err)
+		return nil
+	}
+
+	// Construct hostname based on mode
+	var hostname string
+	if multiNet {
+		// Multi-network mode: remove network-specific entry
+		// Format: containerName.networkName[.domain]
+		hostname = containerName + "." + networkName
+		if domain != "" {
+			hostname = hostname + "." + domain
+		}
+	} else {
+		// Single network mode: remove base hostname
+		// Format: containerName[.domain]
+		hostname = containerName
+		if domain != "" {
+			hostname = hostname + "." + domain
+		}
+	}
+
+	// Remove host from file
+	if err := hf.RemoveHost(hostname); err != nil {
+		// Host not found is OK (may have been manually removed)
+		log.Printf("NOTE: could not remove host %s: %v", hostname, err)
+	} else {
+		log.Printf("removed host entry for container %s: %s", containerName, hostname)
+	}
+
+	// Write to disk
+	if err := wm.requestWrite(); err != nil {
+		return fmt.Errorf("failed to write hostfile: %w", err)
+	}
+
+	return nil
+}
+
+// handleContainerDie handles container die events by removing all entries for the container
 func handleContainerDie(
 	ctx context.Context,
 	cli DockerClient,
@@ -311,48 +420,20 @@ func handleContainerDie(
 	domain string,
 	multiNet bool,
 ) error {
-	// Get container IP addresses to determine network names for multiNet mode
-	ips, err := getContainerIPs(ctx, cli, containerID)
-	if err != nil {
-		// Container may already be removed, use best effort
-		if multiNet {
-			log.Printf("WARNING: cannot determine networks for container %s (may already be removed), skipping removal", containerName)
-			return nil // Not a fatal error
+	// Use pattern-based removal to remove all entries for this container
+	// This works even when the container is already removed and we can't inspect it
+	// It correctly handles both single-network mode (containerName) and multi-network mode
+	// (containerName.networkName) by matching the first dot-delimited component
+	removed := hf.RemoveHostsWithName(containerName)
+
+	// Write to disk if anything was removed
+	if len(removed) > 0 {
+		if err := wm.requestWrite(); err != nil {
+			return fmt.Errorf("failed to write hostfile: %w", err)
 		}
-		// For single network mode, we can still construct the hostname
-		ips = make(map[string]string)
+		log.Printf("removed host entries for container %s: %v", containerName, removed)
 	}
 
-	// Construct hostnames
-	hostnames := constructHostnames(containerName, domain, ips, multiNet)
-
-	// For single-network mode with no IPs, construct the basic hostname
-	if len(hostnames) == 0 && !multiNet {
-		hostname := containerName
-		if domain != "" {
-			hostname = hostname + "." + domain
-		}
-		hostnames[hostname] = "" // IP doesn't matter for removal
-	}
-
-	// Remove hosts from file
-	for hostname := range hostnames {
-		if err := hf.RemoveHost(hostname); err != nil {
-			// Host not found is OK
-			log.Printf("NOTE: could not remove host %s: %v", hostname, err)
-		}
-	}
-
-	// Write to disk
-	if err := wm.requestWrite(); err != nil {
-		return fmt.Errorf("failed to write hostfile: %w", err)
-	}
-
-	hostnamesList := make([]string, 0, len(hostnames))
-	for h := range hostnames {
-		hostnamesList = append(hostnamesList, h)
-	}
-	log.Printf("removed host entries for container %s: %v", containerName, hostnamesList)
 	return nil
 }
 
@@ -365,8 +446,9 @@ func runEventLoop(
 	wm *writeManager,
 	cfg Config,
 ) error {
-	// Get event stream
+	// Get event stream - listen to both network and container events
 	filters := client.Filters{}
+	filters.Add("type", "network")
 	filters.Add("type", "container")
 	result := cli.Events(ctx, client.EventsListOptions{Filters: filters})
 
@@ -376,22 +458,43 @@ func runEventLoop(
 	for {
 		select {
 		case msg := <-result.Messages:
-			name := msg.Actor.Attributes["name"]
 			var err error
 
-			switch msg.Action {
-			case "start":
-				err = handleContainerStart(ctx, cli, hf, wm, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
-				if err != nil {
-					log.Printf("ERROR: handling container start: %v (will resync on reconnection)", err)
-					// Continue processing events - don't kill daemon for single container failure
+			// Handle different event types
+			switch msg.Type {
+			case "network":
+				// Network events: connect/disconnect
+				networkName := msg.Actor.Attributes["name"]
+				containerID := msg.Actor.Attributes["container"]
+
+				switch msg.Action {
+				case "connect":
+					err = handleNetworkConnect(ctx, cli, hf, wm, containerID, networkName, cfg.Domain, cfg.MultiNet)
+					if err != nil {
+						log.Printf("ERROR: handling network connect: %v (will resync on reconnection)", err)
+						// Continue processing events - don't kill daemon for single container failure
+					}
+
+				case "disconnect":
+					err = handleNetworkDisconnect(ctx, cli, hf, wm, containerID, networkName, cfg.Domain, cfg.MultiNet)
+					if err != nil {
+						log.Printf("ERROR: handling network disconnect: %v", err)
+						// Continue processing events - don't kill daemon for single container failure
+					}
 				}
 
-			case "die":
-				err = handleContainerDie(ctx, cli, hf, wm, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
-				if err != nil {
-					log.Printf("ERROR: handling container die: %v", err)
-					// Continue processing events - don't kill daemon for single container failure
+			case "container":
+				// Container events: die (for bulk cleanup)
+				containerName := msg.Actor.Attributes["name"]
+				containerID := msg.Actor.ID
+
+				switch msg.Action {
+				case "die":
+					err = handleContainerDie(ctx, cli, hf, wm, containerID, containerName, cfg.Domain, cfg.MultiNet)
+					if err != nil {
+						log.Printf("ERROR: handling container die: %v", err)
+						// Continue processing events - don't kill daemon for single container failure
+					}
 				}
 			}
 

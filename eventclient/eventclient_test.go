@@ -419,314 +419,6 @@ func TestSyncRunningContainers(t *testing.T) {
 	}
 }
 
-func TestHandleContainerStart(t *testing.T) {
-	tests := []struct {
-		name          string
-		containerID   string
-		containerName string
-		domain        string
-		multiNet      bool
-		mockInspect   client.ContainerInspectResult
-		mockErr       error
-		wantHosts     map[string]string
-		wantErr       bool
-	}{
-		{
-			name:          "successful start single network",
-			containerID:   "container123",
-			containerName: "web",
-			domain:        "",
-			multiNet:      false,
-			mockInspect: client.ContainerInspectResult{
-				Container: container.InspectResponse{
-					NetworkSettings: mockNetworkSettings(map[string]string{
-						"bridge": "172.17.0.2",
-					}),
-				},
-			},
-			wantHosts: map[string]string{
-				"web": "172.17.0.2",
-			},
-			wantErr: false,
-		},
-		{
-			name:          "successful start with domain",
-			containerID:   "container456",
-			containerName: "db",
-			domain:        "example.org",
-			multiNet:      false,
-			mockInspect: client.ContainerInspectResult{
-				Container: container.InspectResponse{
-					NetworkSettings: mockNetworkSettings(map[string]string{
-						"bridge": "172.17.0.3",
-					}),
-				},
-			},
-			wantHosts: map[string]string{
-				"db.example.org": "172.17.0.3",
-			},
-			wantErr: false,
-		},
-		{
-			name:          "multi-network mode",
-			containerID:   "container789",
-			containerName: "app",
-			domain:        "example.org",
-			multiNet:      true,
-			mockInspect: client.ContainerInspectResult{
-				Container: container.InspectResponse{
-					NetworkSettings: mockNetworkSettings(map[string]string{
-						"net1": "172.18.0.2",
-						"net2": "172.19.0.3",
-					}),
-				},
-			},
-			wantHosts: map[string]string{
-				"app.net1.example.org": "172.18.0.2",
-				"app.net2.example.org": "172.19.0.3",
-			},
-			wantErr: false,
-		},
-		{
-			name:          "container with no IPs - not an error",
-			containerID:   "container000",
-			containerName: "nonet",
-			domain:        "",
-			multiNet:      false,
-			mockInspect: client.ContainerInspectResult{
-				Container: container.InspectResponse{
-					NetworkSettings: &container.NetworkSettings{},
-				},
-			},
-			wantHosts: map[string]string{},
-			wantErr:   false,
-		},
-		{
-			name:          "inspect error",
-			containerID:   "badcontainer",
-			containerName: "bad",
-			mockErr:       errors.New("container not found"),
-			wantErr:       true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			hf, _ := createTempHostfile(t)
-			ctx := context.Background()
-			wm := newWriteManager(ctx, hf, "", 0) // No update command, no throttling for tests
-
-			mock := &mockDockerClient{
-				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
-					if containerID != tt.containerID {
-						t.Errorf("unexpected containerID: got %s, want %s", containerID, tt.containerID)
-					}
-					return tt.mockInspect, tt.mockErr
-				},
-			}
-
-			err := handleContainerStart(ctx, mock, hf, wm, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("handleContainerStart() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			if !tt.wantErr {
-				// Verify hostfile contents
-				for hostname, expectedIP := range tt.wantHosts {
-					gotIP, err := hf.LookupHost(hostname)
-					if err != nil {
-						t.Errorf("handleContainerStart() missing host %s: %v", hostname, err)
-					} else if gotIP != expectedIP {
-						t.Errorf("handleContainerStart() host %s has IP %s, want %s", hostname, gotIP, expectedIP)
-					}
-				}
-
-				// Verify no extra hosts were added
-				if len(tt.wantHosts) == 0 {
-					// For the no-IPs case, verify the file is empty or doesn't have our hostname
-					if ip, err := hf.LookupHost(tt.containerName); err == nil {
-						t.Errorf("handleContainerStart() unexpectedly added host %s with IP %s", tt.containerName, ip)
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestHandleContainerDie(t *testing.T) {
-	tests := []struct {
-		name               string
-		containerID        string
-		containerName      string
-		domain             string
-		multiNet           bool
-		initialHosts       map[string]string
-		mockInspect        client.ContainerInspectResult
-		mockErr            error
-		wantRemainingHosts map[string]string
-		wantErr            bool
-	}{
-		{
-			name:          "remove single network entry",
-			containerID:   "container123",
-			containerName: "web",
-			domain:        "",
-			multiNet:      false,
-			initialHosts: map[string]string{
-				"web": "172.17.0.2",
-				"db":  "172.17.0.3",
-			},
-			mockInspect: client.ContainerInspectResult{
-				Container: container.InspectResponse{
-					NetworkSettings: mockNetworkSettings(map[string]string{
-						"bridge": "172.17.0.2",
-					}),
-				},
-			},
-			wantRemainingHosts: map[string]string{
-				"db": "172.17.0.3",
-			},
-			wantErr: false,
-		},
-		{
-			name:          "remove with domain",
-			containerID:   "container456",
-			containerName: "web",
-			domain:        "example.org",
-			multiNet:      false,
-			initialHosts: map[string]string{
-				"web.example.org": "172.17.0.2",
-				"db.example.org":  "172.17.0.3",
-			},
-			mockInspect: client.ContainerInspectResult{
-				Container: container.InspectResponse{
-					NetworkSettings: mockNetworkSettings(map[string]string{
-						"bridge": "172.17.0.2",
-					}),
-				},
-			},
-			wantRemainingHosts: map[string]string{
-				"db.example.org": "172.17.0.3",
-			},
-			wantErr: false,
-		},
-		{
-			name:          "remove multi-network entries",
-			containerID:   "container789",
-			containerName: "app",
-			domain:        "example.org",
-			multiNet:      true,
-			initialHosts: map[string]string{
-				"app.net1.example.org": "172.18.0.2",
-				"app.net2.example.org": "172.19.0.3",
-				"db.example.org":       "172.17.0.4",
-			},
-			mockInspect: client.ContainerInspectResult{
-				Container: container.InspectResponse{
-					NetworkSettings: mockNetworkSettings(map[string]string{
-						"net1": "172.18.0.2",
-						"net2": "172.19.0.3",
-					}),
-				},
-			},
-			wantRemainingHosts: map[string]string{
-				"db.example.org": "172.17.0.4",
-			},
-			wantErr: false,
-		},
-		{
-			name:          "container already removed - single network mode",
-			containerID:   "container999",
-			containerName: "removed",
-			domain:        "",
-			multiNet:      false,
-			initialHosts: map[string]string{
-				"removed": "172.17.0.5",
-			},
-			mockErr:            errors.New("container not found"),
-			wantRemainingHosts: map[string]string{},
-			wantErr:            false, // Not a fatal error in single network mode
-		},
-		{
-			name:          "container already removed - multi network mode",
-			containerID:   "container888",
-			containerName: "removed",
-			domain:        "",
-			multiNet:      true,
-			initialHosts: map[string]string{
-				"other": "172.17.0.6",
-			},
-			mockErr: errors.New("container not found"),
-			wantRemainingHosts: map[string]string{
-				"other": "172.17.0.6",
-			},
-			wantErr: false, // Not a fatal error, just skips removal
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			hf, _ := createTempHostfile(t)
-			ctx := context.Background()
-			wm := newWriteManager(ctx, hf, "", 0) // No update command, no throttling for tests
-
-			// Populate initial hosts
-			for hostname, ip := range tt.initialHosts {
-				if err := hf.AddHost(hostname, ip); err != nil {
-					t.Fatalf("failed to setup test: %v", err)
-				}
-			}
-			if err := hf.Write(); err != nil {
-				t.Fatalf("failed to write initial hosts: %v", err)
-			}
-
-			mock := &mockDockerClient{
-				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
-					if containerID != tt.containerID {
-						t.Errorf("unexpected containerID: got %s, want %s", containerID, tt.containerID)
-					}
-					return tt.mockInspect, tt.mockErr
-				},
-			}
-
-			err := handleContainerDie(ctx, mock, hf, wm, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("handleContainerDie() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			if !tt.wantErr {
-				// Reload the hostfile to verify what's on disk
-				if err := hf.Read(); err != nil && !os.IsNotExist(err) {
-					t.Fatalf("failed to read hostfile: %v", err)
-				}
-
-				// Verify remaining hosts
-				for hostname, expectedIP := range tt.wantRemainingHosts {
-					gotIP, err := hf.LookupHost(hostname)
-					if err != nil {
-						t.Errorf("handleContainerDie() missing remaining host %s: %v", hostname, err)
-					} else if gotIP != expectedIP {
-						t.Errorf("handleContainerDie() host %s has IP %s, want %s", hostname, gotIP, expectedIP)
-					}
-				}
-
-				// Verify removed hosts are gone
-				for hostname := range tt.initialHosts {
-					if _, shouldRemain := tt.wantRemainingHosts[hostname]; !shouldRemain {
-						if _, err := hf.LookupHost(hostname); err == nil {
-							t.Errorf("handleContainerDie() failed to remove host %s", hostname)
-						}
-					}
-				}
-			}
-		})
-	}
-}
-
 func TestWriteManagerNoThrottling(t *testing.T) {
 	hf, _ := createTempHostfile(t)
 	ctx := context.Background()
@@ -1019,5 +711,693 @@ func TestWriteManagerContextCancellation(t *testing.T) {
 	output, err := os.ReadFile(outputPath)
 	if err == nil && strings.Contains(string(output), "should not appear") {
 		t.Errorf("command should have been canceled, but output was written: %s", string(output))
+	}
+}
+
+func TestGetContainerIPForNetwork(t *testing.T) {
+	tests := []struct {
+		name            string
+		containerID     string
+		networkName     string
+		mockResult      client.ContainerInspectResult
+		mockErr         error
+		wantName        string
+		wantIP          string
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:        "valid network with IPv4",
+			containerID: "container123",
+			networkName: "bridge",
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/web",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.2",
+					}),
+				},
+			},
+			wantName: "web",
+			wantIP:   "172.17.0.2",
+			wantErr:  false,
+		},
+		{
+			name:        "container name without leading slash",
+			containerID: "container456",
+			networkName: "net1",
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "db",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net1": "172.18.0.5",
+					}),
+				},
+			},
+			wantName: "db",
+			wantIP:   "172.18.0.5",
+			wantErr:  false,
+		},
+		{
+			name:        "network not found",
+			containerID: "container789",
+			networkName: "nonexistent",
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/app",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.3",
+					}),
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "not connected to network",
+		},
+		{
+			name:            "container inspect failure",
+			containerID:     "badcontainer",
+			networkName:     "bridge",
+			mockErr:         errors.New("container not found"),
+			wantErr:         true,
+			wantErrContains: "failed to inspect",
+		},
+		{
+			name:        "no network settings",
+			containerID: "container999",
+			networkName: "bridge",
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name:            "/test",
+					NetworkSettings: nil,
+				},
+			},
+			wantErr:         true,
+			wantErrContains: "no network settings",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockDockerClient{
+				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+					if containerID != tt.containerID {
+						t.Errorf("unexpected containerID: got %s, want %s", containerID, tt.containerID)
+					}
+					return tt.mockResult, tt.mockErr
+				},
+			}
+
+			gotName, gotIP, err := getContainerIPForNetwork(context.Background(), mock, tt.containerID, tt.networkName)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("getContainerIPForNetwork() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr {
+				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("getContainerIPForNetwork() error = %v, should contain %q", err, tt.wantErrContains)
+				}
+				return
+			}
+
+			if gotName != tt.wantName {
+				t.Errorf("getContainerIPForNetwork() name = %s, want %s", gotName, tt.wantName)
+			}
+			if gotIP != tt.wantIP {
+				t.Errorf("getContainerIPForNetwork() IP = %s, want %s", gotIP, tt.wantIP)
+			}
+		})
+	}
+}
+
+func TestHandleNetworkConnect(t *testing.T) {
+	tests := []struct {
+		name            string
+		containerID     string
+		networkName     string
+		domain          string
+		multiNet        bool
+		mockResult      client.ContainerInspectResult
+		mockErr         error
+		existingHosts   map[string]string
+		wantHosts       map[string]string
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:        "single network mode - no existing entry",
+			containerID: "container1",
+			networkName: "bridge",
+			domain:      "",
+			multiNet:    false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/web",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.2",
+					}),
+				},
+			},
+			existingHosts: map[string]string{},
+			wantHosts: map[string]string{
+				"web": "172.17.0.2",
+			},
+			wantErr: false,
+		},
+		{
+			name:        "single network mode - existing entry",
+			containerID: "container2",
+			networkName: "net2",
+			domain:      "",
+			multiNet:    false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/app",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net2": "172.18.0.5",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"app": "172.17.0.2", // Already exists from net1
+			},
+			wantHosts: map[string]string{
+				"app": "172.17.0.2", // Should remain unchanged
+			},
+			wantErr: false,
+		},
+		{
+			name:        "multi network mode - add network-specific entry",
+			containerID: "container3",
+			networkName: "net1",
+			domain:      "",
+			multiNet:    true,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/db",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net1": "172.18.0.10",
+					}),
+				},
+			},
+			existingHosts: map[string]string{},
+			wantHosts: map[string]string{
+				"db.net1": "172.18.0.10",
+			},
+			wantErr: false,
+		},
+		{
+			name:        "multi network mode with domain",
+			containerID: "container4",
+			networkName: "bridge",
+			domain:      "example.org",
+			multiNet:    true,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/api",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.20",
+					}),
+				},
+			},
+			existingHosts: map[string]string{},
+			wantHosts: map[string]string{
+				"api.bridge.example.org": "172.17.0.20",
+			},
+			wantErr: false,
+		},
+		{
+			name:        "single network mode with domain",
+			containerID: "container5",
+			networkName: "net1",
+			domain:      "example.org",
+			multiNet:    false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/service",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net1": "172.18.0.30",
+					}),
+				},
+			},
+			existingHosts: map[string]string{},
+			wantHosts: map[string]string{
+				"service.example.org": "172.18.0.30",
+			},
+			wantErr: false,
+		},
+		{
+			name:            "container inspect failure",
+			containerID:     "badcontainer",
+			networkName:     "bridge",
+			domain:          "",
+			multiNet:        false,
+			mockErr:         errors.New("container not found"),
+			wantErr:         true,
+			wantErrContains: "failed to get container IP",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hf, _ := createTempHostfile(t)
+
+			// Add existing hosts
+			for hostname, ip := range tt.existingHosts {
+				if err := hf.AddHost(hostname, ip); err != nil {
+					t.Fatalf("failed to add existing host: %v", err)
+				}
+			}
+
+			mock := &mockDockerClient{
+				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+					if containerID != tt.containerID {
+						t.Errorf("unexpected containerID: got %s, want %s", containerID, tt.containerID)
+					}
+					return tt.mockResult, tt.mockErr
+				},
+			}
+
+			wm := newWriteManager(context.Background(), hf, "", 0)
+
+			err := handleNetworkConnect(context.Background(), mock, hf, wm, tt.containerID, tt.networkName, tt.domain, tt.multiNet)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("handleNetworkConnect() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr {
+				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("handleNetworkConnect() error = %v, should contain %q", err, tt.wantErrContains)
+				}
+				return
+			}
+
+			// Verify hostfile contents
+			for hostname, expectedIP := range tt.wantHosts {
+				gotIP, err := hf.LookupHost(hostname)
+				if err != nil {
+					t.Errorf("expected hostname %s not found in hostfile", hostname)
+				} else if gotIP != expectedIP {
+					t.Errorf("hostname %s has IP %s, want %s", hostname, gotIP, expectedIP)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleNetworkDisconnect(t *testing.T) {
+	tests := []struct {
+		name            string
+		containerID     string
+		networkName     string
+		domain          string
+		multiNet        bool
+		mockResult      client.ContainerInspectResult
+		mockErr         error
+		existingHosts   map[string]string
+		wantHosts       map[string]string
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:        "single network mode - remove base hostname",
+			containerID: "container1",
+			networkName: "bridge",
+			domain:      "",
+			multiNet:    false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/web",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.2",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"web": "172.17.0.2",
+			},
+			wantHosts: map[string]string{},
+			wantErr:   false,
+		},
+		{
+			name:        "multi network mode - remove network-specific entry",
+			containerID: "container2",
+			networkName: "net1",
+			domain:      "",
+			multiNet:    true,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/app",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net1": "172.18.0.5",
+						"net2": "172.19.0.6",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"app.net1": "172.18.0.5",
+				"app.net2": "172.19.0.6",
+			},
+			wantHosts: map[string]string{
+				"app.net2": "172.19.0.6", // net1 entry should be removed
+			},
+			wantErr: false,
+		},
+		{
+			name:        "with domain",
+			containerID: "container3",
+			networkName: "bridge",
+			domain:      "example.org",
+			multiNet:    false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/db",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.10",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"db.example.org": "172.17.0.10",
+			},
+			wantHosts: map[string]string{},
+			wantErr:   false,
+		},
+		{
+			name:        "multi network mode with domain",
+			containerID: "container4",
+			networkName: "net2",
+			domain:      "example.org",
+			multiNet:    true,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/api",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net1": "172.18.0.20",
+						"net2": "172.19.0.21",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"api.net1.example.org": "172.18.0.20",
+				"api.net2.example.org": "172.19.0.21",
+			},
+			wantHosts: map[string]string{
+				"api.net1.example.org": "172.18.0.20", // Only net2 entry should be removed
+			},
+			wantErr: false,
+		},
+		{
+			name:        "container already removed - should not error",
+			containerID: "removedcontainer",
+			networkName: "bridge",
+			domain:      "",
+			multiNet:    false,
+			mockErr:     errors.New("container not found"),
+			existingHosts: map[string]string{
+				"old": "172.17.0.99",
+			},
+			wantHosts: map[string]string{
+				"old": "172.17.0.99", // Should remain unchanged
+			},
+			wantErr: false, // Should handle gracefully
+		},
+		{
+			name:        "host entry doesn't exist - should not error",
+			containerID: "container5",
+			networkName: "bridge",
+			domain:      "",
+			multiNet:    false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					Name: "/test",
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.50",
+					}),
+				},
+			},
+			existingHosts: map[string]string{},
+			wantHosts:     map[string]string{},
+			wantErr:       false, // Should handle missing entry gracefully
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hf, _ := createTempHostfile(t)
+
+			// Add existing hosts
+			for hostname, ip := range tt.existingHosts {
+				if err := hf.AddHost(hostname, ip); err != nil {
+					t.Fatalf("failed to add existing host: %v", err)
+				}
+			}
+
+			mock := &mockDockerClient{
+				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+					if containerID != tt.containerID {
+						t.Errorf("unexpected containerID: got %s, want %s", containerID, tt.containerID)
+					}
+					return tt.mockResult, tt.mockErr
+				},
+			}
+
+			wm := newWriteManager(context.Background(), hf, "", 0)
+
+			err := handleNetworkDisconnect(context.Background(), mock, hf, wm, tt.containerID, tt.networkName, tt.domain, tt.multiNet)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("handleNetworkDisconnect() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr {
+				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("handleNetworkDisconnect() error = %v, should contain %q", err, tt.wantErrContains)
+				}
+				return
+			}
+
+			// Verify hostfile contents match expected
+			for hostname, expectedIP := range tt.wantHosts {
+				gotIP, err := hf.LookupHost(hostname)
+				if err != nil {
+					t.Errorf("expected hostname %s not found in hostfile", hostname)
+				} else if gotIP != expectedIP {
+					t.Errorf("hostname %s has IP %s, want %s", hostname, gotIP, expectedIP)
+				}
+			}
+
+			// Verify removed hosts are not in hostfile
+			for hostname := range tt.existingHosts {
+				if _, shouldExist := tt.wantHosts[hostname]; !shouldExist {
+					if _, err := hf.LookupHost(hostname); err == nil {
+						t.Errorf("hostname %s should have been removed but still exists", hostname)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestHandleContainerDie(t *testing.T) {
+	tests := []struct {
+		name            string
+		containerID     string
+		containerName   string
+		domain          string
+		multiNet        bool
+		mockResult      client.ContainerInspectResult
+		mockErr         error
+		existingHosts   map[string]string
+		wantHosts       map[string]string
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:          "single network mode - remove entry",
+			containerID:   "container1",
+			containerName: "web",
+			domain:        "",
+			multiNet:      false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.2",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"web": "172.17.0.2",
+				"db":  "172.17.0.3",
+			},
+			wantHosts: map[string]string{
+				"db": "172.17.0.3",
+			},
+			wantErr: false,
+		},
+		{
+			name:          "single network mode with domain",
+			containerID:   "container2",
+			containerName: "app",
+			domain:        "example.org",
+			multiNet:      false,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"bridge": "172.17.0.5",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"app.example.org": "172.17.0.5",
+				"db.example.org":  "172.17.0.6",
+			},
+			wantHosts: map[string]string{
+				"db.example.org": "172.17.0.6",
+			},
+			wantErr: false,
+		},
+		{
+			name:          "multi network mode - remove all network entries",
+			containerID:   "container3",
+			containerName: "service",
+			domain:        "",
+			multiNet:      true,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net1": "172.18.0.10",
+						"net2": "172.19.0.11",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"service.net1": "172.18.0.10",
+				"service.net2": "172.19.0.11",
+				"other.net1":   "172.18.0.20",
+			},
+			wantHosts: map[string]string{
+				"other.net1": "172.18.0.20",
+			},
+			wantErr: false,
+		},
+		{
+			name:          "multi network mode with domain",
+			containerID:   "container4",
+			containerName: "api",
+			domain:        "example.org",
+			multiNet:      true,
+			mockResult: client.ContainerInspectResult{
+				Container: container.InspectResponse{
+					NetworkSettings: mockNetworkSettings(map[string]string{
+						"net1": "172.18.0.30",
+						"net2": "172.19.0.31",
+					}),
+				},
+			},
+			existingHosts: map[string]string{
+				"api.net1.example.org":   "172.18.0.30",
+				"api.net2.example.org":   "172.19.0.31",
+				"other.net1.example.org": "172.18.0.99",
+			},
+			wantHosts: map[string]string{
+				"other.net1.example.org": "172.18.0.99",
+			},
+			wantErr: false,
+		},
+		{
+			name:          "container already removed - single network mode",
+			containerID:   "deadcontainer",
+			containerName: "removed",
+			domain:        "",
+			multiNet:      false,
+			mockErr:       errors.New("container not found"),
+			existingHosts: map[string]string{
+				"removed": "172.17.0.50",
+				"alive":   "172.17.0.51",
+			},
+			wantHosts: map[string]string{
+				"alive": "172.17.0.51",
+			},
+			wantErr: false, // Should handle gracefully
+		},
+		{
+			name:          "container already removed - multi network mode",
+			containerID:   "deadcontainer2",
+			containerName: "removed",
+			domain:        "",
+			multiNet:      true,
+			mockErr:       errors.New("container not found"),
+			existingHosts: map[string]string{
+				"removed.net1": "172.18.0.60",
+				"removed.net2": "172.19.0.61",
+				"alive.net1":   "172.18.0.70",
+			},
+			wantHosts: map[string]string{
+				"alive.net1": "172.18.0.70", // removed.* entries correctly removed using pattern matching
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hf, _ := createTempHostfile(t)
+
+			// Add existing hosts
+			for hostname, ip := range tt.existingHosts {
+				if err := hf.AddHost(hostname, ip); err != nil {
+					t.Fatalf("failed to add existing host: %v", err)
+				}
+			}
+
+			mock := &mockDockerClient{
+				inspectFunc: func(ctx context.Context, containerID string, options client.ContainerInspectOptions) (client.ContainerInspectResult, error) {
+					if containerID != tt.containerID {
+						t.Errorf("unexpected containerID: got %s, want %s", containerID, tt.containerID)
+					}
+					return tt.mockResult, tt.mockErr
+				},
+			}
+
+			wm := newWriteManager(context.Background(), hf, "", 0)
+
+			err := handleContainerDie(context.Background(), mock, hf, wm, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("handleContainerDie() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr {
+				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
+					t.Errorf("handleContainerDie() error = %v, should contain %q", err, tt.wantErrContains)
+				}
+				return
+			}
+
+			// Verify hostfile contents match expected
+			for hostname, expectedIP := range tt.wantHosts {
+				gotIP, err := hf.LookupHost(hostname)
+				if err != nil {
+					t.Errorf("expected hostname %s not found in hostfile", hostname)
+				} else if gotIP != expectedIP {
+					t.Errorf("hostname %s has IP %s, want %s", hostname, gotIP, expectedIP)
+				}
+			}
+
+			// Verify removed hosts are not in hostfile
+			for hostname := range tt.existingHosts {
+				if _, shouldExist := tt.wantHosts[hostname]; !shouldExist {
+					if _, err := hf.LookupHost(hostname); err == nil {
+						t.Errorf("hostname %s should have been removed but still exists", hostname)
+					}
+				}
+			}
+		})
 	}
 }

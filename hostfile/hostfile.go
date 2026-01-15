@@ -78,6 +78,29 @@ func (hf *Hostfile) RemoveHost(name string) error {
 	return nil
 }
 
+// RemoveHostsWithName removes all host entries for the given container name.
+// It matches hostnames where the first dot-delimited component equals the container name.
+// This correctly handles both single-network mode (containerName) and multi-network mode
+// (containerName.networkName) while avoiding false matches (e.g., "foo" vs "foobar").
+// Returns the list of hostnames that were removed.
+func (hf *Hostfile) RemoveHostsWithName(containerName string) []string {
+	var removed []string
+	for hostname := range hf.hosts {
+		// Extract first dot-delimited component
+		firstComponent := hostname
+		if idx := strings.Index(hostname, "."); idx != -1 {
+			firstComponent = hostname[:idx]
+		}
+
+		// Match if first component equals container name
+		if firstComponent == containerName {
+			delete(hf.hosts, hostname)
+			removed = append(removed, hostname)
+		}
+	}
+	return removed
+}
+
 // LookupHost looks up the IP address for the given hostname.
 // Returns the IP address and nil error if found, or an empty string
 // and an error if the host is not found.

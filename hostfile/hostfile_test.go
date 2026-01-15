@@ -840,3 +840,133 @@ func TestWriteDefaultPermissions(t *testing.T) {
 		t.Errorf("Write() created file with permissions %o, want %o (default)", info.Mode().Perm(), expectedPerm)
 	}
 }
+
+func TestRemoveHostsWithName(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialHosts  map[string]string
+		containerName string
+		wantRemoved   []string
+		wantRemaining map[string]string
+	}{
+		{
+			name: "remove single-network mode entry",
+			initialHosts: map[string]string{
+				"foo":    "172.17.0.2",
+				"bar":    "172.17.0.3",
+				"foobar": "172.17.0.4",
+			},
+			containerName: "foo",
+			wantRemoved:   []string{"foo"},
+			wantRemaining: map[string]string{
+				"bar":    "172.17.0.3",
+				"foobar": "172.17.0.4",
+			},
+		},
+		{
+			name: "remove multi-network mode entries",
+			initialHosts: map[string]string{
+				"foo.bridge":    "172.17.0.2",
+				"foo.customnet": "172.18.0.2",
+				"bar.bridge":    "172.17.0.3",
+				"foobar.bridge": "172.17.0.4",
+			},
+			containerName: "foo",
+			wantRemoved:   []string{"foo.bridge", "foo.customnet"},
+			wantRemaining: map[string]string{
+				"bar.bridge":    "172.17.0.3",
+				"foobar.bridge": "172.17.0.4",
+			},
+		},
+		{
+			name: "remove entries with domain",
+			initialHosts: map[string]string{
+				"foo.bridge.example.org":    "172.17.0.2",
+				"foo.customnet.example.org": "172.18.0.2",
+				"bar.bridge.example.org":    "172.17.0.3",
+			},
+			containerName: "foo",
+			wantRemoved:   []string{"foo.bridge.example.org", "foo.customnet.example.org"},
+			wantRemaining: map[string]string{
+				"bar.bridge.example.org": "172.17.0.3",
+			},
+		},
+		{
+			name: "no matching entries",
+			initialHosts: map[string]string{
+				"bar.bridge":    "172.17.0.2",
+				"foobar.bridge": "172.17.0.3",
+			},
+			containerName: "foo",
+			wantRemoved:   []string{},
+			wantRemaining: map[string]string{
+				"bar.bridge":    "172.17.0.2",
+				"foobar.bridge": "172.17.0.3",
+			},
+		},
+		{
+			name: "avoid false matches with similar names",
+			initialHosts: map[string]string{
+				"foo.bridge":      "172.17.0.2",
+				"foobar.bridge":   "172.17.0.3",
+				"foo-test.bridge": "172.17.0.4",
+				"myfoo.bridge":    "172.17.0.5",
+			},
+			containerName: "foo",
+			wantRemoved:   []string{"foo.bridge"},
+			wantRemaining: map[string]string{
+				"foobar.bridge":   "172.17.0.3",
+				"foo-test.bridge": "172.17.0.4",
+				"myfoo.bridge":    "172.17.0.5",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hf := NewHostfile("/tmp/test")
+
+			// Add initial hosts
+			for hostname, ip := range tt.initialHosts {
+				if err := hf.AddHost(hostname, ip); err != nil {
+					t.Fatalf("failed to add initial host: %v", err)
+				}
+			}
+
+			// Remove hosts with name
+			removed := hf.RemoveHostsWithName(tt.containerName)
+
+			// Check removed list (order doesn't matter)
+			if len(removed) != len(tt.wantRemoved) {
+				t.Errorf("removed %d entries, want %d. Got: %v, Want: %v", len(removed), len(tt.wantRemoved), removed, tt.wantRemoved)
+			} else {
+				removedMap := make(map[string]bool)
+				for _, h := range removed {
+					removedMap[h] = true
+				}
+				for _, wantHost := range tt.wantRemoved {
+					if !removedMap[wantHost] {
+						t.Errorf("expected %s to be removed but it wasn't. Removed: %v", wantHost, removed)
+					}
+				}
+			}
+
+			// Check remaining hosts
+			for hostname, expectedIP := range tt.wantRemaining {
+				gotIP, err := hf.LookupHost(hostname)
+				if err != nil {
+					t.Errorf("expected hostname %s to remain but it was removed", hostname)
+				} else if gotIP != expectedIP {
+					t.Errorf("hostname %s has IP %s, want %s", hostname, gotIP, expectedIP)
+				}
+			}
+
+			// Check that removed hosts are gone
+			for _, hostname := range tt.wantRemoved {
+				if _, err := hf.LookupHost(hostname); err == nil {
+					t.Errorf("hostname %s should have been removed but still exists", hostname)
+				}
+			}
+		})
+	}
+}
