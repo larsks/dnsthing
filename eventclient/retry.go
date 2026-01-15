@@ -31,7 +31,7 @@ func DefaultRetryConfig() RetryConfig {
 }
 
 // RetryWithBackoff executes the given function with exponential backoff retry logic.
-// It retries the function until it succeeds, the context is cancelled, or MaxRetries is reached.
+// It retries the function until it succeeds, the context is canceled, or MaxRetries is reached.
 //
 // The backoff delay starts at InitialDelay and multiplies by Multiplier after each attempt,
 // up to MaxDelay. Jitter (±25% randomization) is added to prevent thundering herd.
@@ -44,7 +44,7 @@ func DefaultRetryConfig() RetryConfig {
 //
 // Returns:
 //   - nil if function succeeds
-//   - context error if context is cancelled
+//   - context error if context is canceled
 //   - last error if MaxRetries is exceeded
 func RetryWithBackoff(
 	ctx context.Context,

@@ -356,7 +356,7 @@ func handleContainerDie(
 	return nil
 }
 
-// runEventLoop processes Docker events until an error occurs or context is cancelled.
+// runEventLoop processes Docker events until an error occurs or context is canceled.
 // This function is designed to be retryable - errors are returned to the caller for retry logic.
 func runEventLoop(
 	ctx context.Context,

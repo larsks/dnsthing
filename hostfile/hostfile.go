@@ -97,7 +97,7 @@ func (hf *Hostfile) Read() error {
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck
 
 	// Clear existing hosts map
 	hf.hosts = make(map[string]string)
@@ -169,6 +169,7 @@ func (hf *Hostfile) Write() error {
 	tmpPath := tmpFile.Name()
 
 	// Ensure cleanup on error
+	//nolint:errcheck
 	defer func() {
 		if tmpFile != nil {
 			tmpFile.Close()
@@ -207,13 +208,14 @@ func (hf *Hostfile) Write() error {
 
 	// Set permissions to match original file
 	if err := os.Chmod(tmpPath, perm); err != nil {
-		os.Remove(tmpPath)
+		os.Remove(tmpPath) //nolint:errcheck
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 
 	// Atomic rename
 	if err := os.Rename(tmpPath, hf.path); err != nil {
-		os.Remove(tmpPath) // Clean up on rename failure
+		// Clean up on rename failure
+		os.Remove(tmpPath) //nolint:errcheck
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 

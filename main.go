@@ -82,7 +82,7 @@ func main() {
 		// Only reached on context cancellation
 		log.Fatalf("error creating Docker client: %v", err)
 	}
-	defer cli.Close()
+	defer cli.Close() //nolint:errcheck
 
 	// Initialize hostfile
 	hf := hostfile.NewHostfile(cfg.HostsPath)

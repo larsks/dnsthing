@@ -997,7 +997,7 @@ func TestWriteManagerContextCancellation(t *testing.T) {
 	outputPath := filepath.Join(filepath.Dir(hostsPath), "output.txt")
 	defer os.Remove(outputPath)
 
-	// Use a long-running command that should be cancelled
+	// Use a long-running command that should be canceled
 	updateCmd := "sleep 10 && echo 'should not appear' >> " + outputPath
 	wm := newWriteManager(ctx, hf, updateCmd, 0)
 
@@ -1015,9 +1015,9 @@ func TestWriteManagerContextCancellation(t *testing.T) {
 	// Wait a bit
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify command was cancelled (file should not exist or be empty)
+	// Verify command was canceled (file should not exist or be empty)
 	output, err := os.ReadFile(outputPath)
 	if err == nil && strings.Contains(string(output), "should not appear") {
-		t.Errorf("command should have been cancelled, but output was written: %s", string(output))
+		t.Errorf("command should have been canceled, but output was written: %s", string(output))
 	}
 }

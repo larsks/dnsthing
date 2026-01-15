@@ -185,7 +185,7 @@ func TestRetryWithBackoff_MaxDelayEnforcement(t *testing.T) {
 	}
 }
 
-// TestRetryWithBackoff_ContextCancellation tests that retry stops when context is cancelled.
+// TestRetryWithBackoff_ContextCancellation tests that retry stops when context is canceled.
 func TestRetryWithBackoff_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := RetryConfig{
@@ -211,7 +211,7 @@ func TestRetryWithBackoff_ContextCancellation(t *testing.T) {
 	}
 
 	// Should have been called at least twice (once before cancel, once after triggering cancel)
-	// but not many more times since we cancelled early
+	// but not many more times since we canceled early
 	if callCount < 2 || callCount > 4 {
 		t.Errorf("expected 2-4 calls before cancellation, got %d", callCount)
 	}
