@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/larsks/dnsthing/eventclient/containers"
+	"github.com/larsks/dnsthing/eventclient/write"
 	"github.com/larsks/dnsthing/hostfile"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
@@ -102,7 +104,7 @@ func TestConstructHostnames(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := constructHostnames(tt.containerName, tt.domain, tt.ips, tt.multiNet)
+			got := containers.ConstructHostnames(tt.containerName, tt.domain, tt.ips, tt.multiNet)
 
 			// Special handling for single network mode with multiple IPs
 			// since map iteration order is non-deterministic
@@ -274,7 +276,7 @@ func TestGetContainerIPs(t *testing.T) {
 				},
 			}
 
-			got, err := getContainerIPs(context.Background(), mock, tt.containerID)
+			got, err := containers.GetContainerIPs(context.Background(), mock, tt.containerID)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("getContainerIPs() error = %v, wantErr %v", err, tt.wantErr)
@@ -380,7 +382,7 @@ func TestSyncRunningContainers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			hf, _ := createTempHostfile(t)
 			ctx := context.Background()
-			wm := newWriteManager(ctx, hf, "", 0) // No update command, no throttling for tests
+			wm := write.NewManager(ctx, hf, "", 0) // No update command, no throttling for tests
 
 			mock := &mockDockerClient{
 				listFunc: func(ctx context.Context, options client.ContainerListOptions) (client.ContainerListResult, error) {
@@ -397,10 +399,18 @@ func TestSyncRunningContainers(t *testing.T) {
 				},
 			}
 
-			err := syncRunningContainers(ctx, mock, hf, wm, tt.domain, tt.multiNet)
+			ectx := &EventContext{
+				Ctx:          ctx,
+				Client:       mock,
+				Hostfile:     hf,
+				WriteManager: wm,
+				Config:       Config{Domain: tt.domain, MultiNet: tt.multiNet},
+			}
+
+			err := SyncRunningContainers(ectx)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("syncRunningContainers() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("SyncRunningContainers() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
@@ -409,9 +419,9 @@ func TestSyncRunningContainers(t *testing.T) {
 				for hostname, expectedIP := range tt.wantHosts {
 					gotIP, err := hf.LookupHost(hostname)
 					if err != nil {
-						t.Errorf("syncRunningContainers() missing host %s: %v", hostname, err)
+						t.Errorf("SyncRunningContainers() missing host %s: %v", hostname, err)
 					} else if gotIP != expectedIP {
-						t.Errorf("syncRunningContainers() host %s has IP %s, want %s", hostname, gotIP, expectedIP)
+						t.Errorf("SyncRunningContainers() host %s has IP %s, want %s", hostname, gotIP, expectedIP)
 					}
 				}
 			}
@@ -422,7 +432,7 @@ func TestSyncRunningContainers(t *testing.T) {
 func TestWriteManagerNoThrottling(t *testing.T) {
 	hf, _ := createTempHostfile(t)
 	ctx := context.Background()
-	wm := newWriteManager(ctx, hf, "", 0) // No throttling
+	wm := write.NewManager(ctx, hf, "", 0) // No throttling
 
 	// Add a host and request write
 	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
@@ -430,7 +440,7 @@ func TestWriteManagerNoThrottling(t *testing.T) {
 	}
 
 	// Write should happen immediately
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("requestWrite failed: %v", err)
 	}
 
@@ -450,7 +460,7 @@ func TestWriteManagerNoThrottling(t *testing.T) {
 func TestWriteManagerWithThrottling(t *testing.T) {
 	hf, _ := createTempHostfile(t)
 	ctx := context.Background()
-	wm := newWriteManager(ctx, hf, "", 200*time.Millisecond) // 200ms throttle
+	wm := write.NewManager(ctx, hf, "", 200*time.Millisecond) // 200ms throttle
 
 	// First write should be immediate
 	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
@@ -458,7 +468,7 @@ func TestWriteManagerWithThrottling(t *testing.T) {
 	}
 
 	start := time.Now()
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("first requestWrite failed: %v", err)
 	}
 	firstWriteDuration := time.Since(start)
@@ -474,7 +484,7 @@ func TestWriteManagerWithThrottling(t *testing.T) {
 	}
 
 	secondWriteStart := time.Now()
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("second requestWrite failed: %v", err)
 	}
 	immediateReturnDuration := time.Since(secondWriteStart)
@@ -503,13 +513,13 @@ func TestWriteManagerWithThrottling(t *testing.T) {
 func TestWriteManagerBatching(t *testing.T) {
 	hf, _ := createTempHostfile(t)
 	ctx := context.Background()
-	wm := newWriteManager(ctx, hf, "", 300*time.Millisecond) // 300ms throttle
+	wm := write.NewManager(ctx, hf, "", 300*time.Millisecond) // 300ms throttle
 
 	// First write - immediate
 	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("first write failed: %v", err)
 	}
 
@@ -518,7 +528,7 @@ func TestWriteManagerBatching(t *testing.T) {
 	if err := hf.AddHost("test2", "192.168.1.2"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("second write failed: %v", err)
 	}
 
@@ -526,7 +536,7 @@ func TestWriteManagerBatching(t *testing.T) {
 	if err := hf.AddHost("test3", "192.168.1.3"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("third write failed: %v", err)
 	}
 
@@ -556,13 +566,13 @@ func TestWriteManagerUpdateCommand(t *testing.T) {
 
 	// Use a command that writes to the output file
 	updateCmd := "echo 'updated' >> " + outputPath
-	wm := newWriteManager(ctx, hf, updateCmd, 0)
+	wm := write.NewManager(ctx, hf, updateCmd, 0)
 
 	// Request a write
 	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("requestWrite failed: %v", err)
 	}
 
@@ -586,13 +596,13 @@ func TestWriteManagerUpdateCommandFailure(t *testing.T) {
 
 	// Use a command that will fail
 	updateCmd := "/bin/sh -c 'exit 1'"
-	wm := newWriteManager(ctx, hf, updateCmd, 0)
+	wm := write.NewManager(ctx, hf, updateCmd, 0)
 
 	// Request a write - should not fail even though command fails
 	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("requestWrite should not fail when update command fails: %v", err)
 	}
 
@@ -611,13 +621,13 @@ func TestWriteManagerUpdateCommandFailure(t *testing.T) {
 func TestWriteManagerNoUpdateCommand(t *testing.T) {
 	hf, _ := createTempHostfile(t)
 	ctx := context.Background()
-	wm := newWriteManager(ctx, hf, "", 0) // No update command
+	wm := write.NewManager(ctx, hf, "", 0) // No update command
 
 	// Request a write
 	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("requestWrite failed: %v", err)
 	}
 
@@ -633,13 +643,13 @@ func TestWriteManagerNoUpdateCommand(t *testing.T) {
 func TestWriteManagerFlush(t *testing.T) {
 	hf, _ := createTempHostfile(t)
 	ctx := context.Background()
-	wm := newWriteManager(ctx, hf, "", 500*time.Millisecond) // Long throttle
+	wm := write.NewManager(ctx, hf, "", 500*time.Millisecond) // Long throttle
 
 	// First write - immediate
 	if err := hf.AddHost("test1", "192.168.1.1"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("first write failed: %v", err)
 	}
 
@@ -648,12 +658,12 @@ func TestWriteManagerFlush(t *testing.T) {
 	if err := hf.AddHost("test2", "192.168.1.2"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("second write failed: %v", err)
 	}
 
 	// Flush immediately (don't wait for timer)
-	if err := wm.flush(); err != nil {
+	if err := wm.Flush(); err != nil {
 		t.Fatalf("flush failed: %v", err)
 	}
 
@@ -673,10 +683,10 @@ func TestWriteManagerFlush(t *testing.T) {
 func TestWriteManagerFlushNoPending(t *testing.T) {
 	hf, _ := createTempHostfile(t)
 	ctx := context.Background()
-	wm := newWriteManager(ctx, hf, "", 100*time.Millisecond)
+	wm := write.NewManager(ctx, hf, "", 100*time.Millisecond)
 
 	// Flush with no pending writes - should not error
-	if err := wm.flush(); err != nil {
+	if err := wm.Flush(); err != nil {
 		t.Errorf("flush with no pending writes should not error: %v", err)
 	}
 }
@@ -691,13 +701,13 @@ func TestWriteManagerContextCancellation(t *testing.T) {
 
 	// Use a long-running command that should be canceled
 	updateCmd := "sleep 10 && echo 'should not appear' >> " + outputPath
-	wm := newWriteManager(ctx, hf, updateCmd, 0)
+	wm := write.NewManager(ctx, hf, updateCmd, 0)
 
 	// Start a write
 	if err := hf.AddHost("test", "192.168.1.1"); err != nil {
 		t.Fatalf("failed to add host: %v", err)
 	}
-	if err := wm.requestWrite(); err != nil {
+	if err := wm.RequestWrite(); err != nil {
 		t.Fatalf("requestWrite failed: %v", err)
 	}
 
@@ -807,7 +817,7 @@ func TestGetContainerIPForNetwork(t *testing.T) {
 				},
 			}
 
-			gotName, gotIP, err := getContainerIPForNetwork(context.Background(), mock, tt.containerID, tt.networkName)
+			gotName, gotIP, err := containers.GetContainerIPForNetwork(context.Background(), mock, tt.containerID, tt.networkName)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("getContainerIPForNetwork() error = %v, wantErr %v", err, tt.wantErr)
@@ -888,7 +898,7 @@ func TestGetContainerName(t *testing.T) {
 				},
 			}
 
-			name, err := getContainerName(context.Background(), mock, tt.containerID)
+			name, err := containers.GetContainerName(context.Background(), mock, tt.containerID)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("getContainerName() error = %v, wantErr %v", err, tt.wantErr)
@@ -1050,18 +1060,26 @@ func TestHandleNetworkConnect(t *testing.T) {
 				},
 			}
 
-			wm := newWriteManager(context.Background(), hf, "", 0)
+			wm := write.NewManager(context.Background(), hf, "", 0)
 
-			err := handleNetworkConnect(context.Background(), mock, hf, wm, tt.containerID, tt.networkName, tt.domain, tt.multiNet)
+			ectx := &EventContext{
+				Ctx:          context.Background(),
+				Client:       mock,
+				Hostfile:     hf,
+				WriteManager: wm,
+				Config:       Config{Domain: tt.domain, MultiNet: tt.multiNet},
+			}
+
+			err := HandleNetworkConnect(ectx, tt.containerID, tt.networkName)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("handleNetworkConnect() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("HandleNetworkConnect() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			if tt.wantErr {
 				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
-					t.Errorf("handleNetworkConnect() error = %v, should contain %q", err, tt.wantErrContains)
+					t.Errorf("HandleNetworkConnect() error = %v, should contain %q", err, tt.wantErrContains)
 				}
 				return
 			}
@@ -1260,18 +1278,26 @@ func TestHandleNetworkDisconnect(t *testing.T) {
 				},
 			}
 
-			wm := newWriteManager(context.Background(), hf, "", 0)
+			wm := write.NewManager(context.Background(), hf, "", 0)
 
-			err := handleNetworkDisconnect(context.Background(), mock, hf, wm, tt.containerID, tt.networkName, tt.domain, tt.multiNet)
+			ectx := &EventContext{
+				Ctx:          context.Background(),
+				Client:       mock,
+				Hostfile:     hf,
+				WriteManager: wm,
+				Config:       Config{Domain: tt.domain, MultiNet: tt.multiNet},
+			}
+
+			err := HandleNetworkDisconnect(ectx, tt.containerID, tt.networkName)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("handleNetworkDisconnect() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("HandleNetworkDisconnect() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			if tt.wantErr {
 				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
-					t.Errorf("handleNetworkDisconnect() error = %v, should contain %q", err, tt.wantErrContains)
+					t.Errorf("HandleNetworkDisconnect() error = %v, should contain %q", err, tt.wantErrContains)
 				}
 				return
 			}
@@ -1459,18 +1485,26 @@ func TestHandleContainerDie(t *testing.T) {
 				},
 			}
 
-			wm := newWriteManager(context.Background(), hf, "", 0)
+			wm := write.NewManager(context.Background(), hf, "", 0)
 
-			err := handleContainerDie(context.Background(), mock, hf, wm, tt.containerID, tt.containerName, tt.domain, tt.multiNet)
+			ectx := &EventContext{
+				Ctx:          context.Background(),
+				Client:       mock,
+				Hostfile:     hf,
+				WriteManager: wm,
+				Config:       Config{Domain: tt.domain, MultiNet: tt.multiNet},
+			}
+
+			err := HandleContainerDie(ectx, tt.containerName)
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("handleContainerDie() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("HandleContainerDie() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			if tt.wantErr {
 				if tt.wantErrContains != "" && !strings.Contains(err.Error(), tt.wantErrContains) {
-					t.Errorf("handleContainerDie() error = %v, should contain %q", err, tt.wantErrContains)
+					t.Errorf("HandleContainerDie() error = %v, should contain %q", err, tt.wantErrContains)
 				}
 				return
 			}
