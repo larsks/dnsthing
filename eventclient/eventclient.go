@@ -356,28 +356,15 @@ func handleContainerDie(
 	return nil
 }
 
-// Run orchestrates the event loop and container syncing
-func Run(
+// runEventLoop processes Docker events until an error occurs or context is cancelled.
+// This function is designed to be retryable - errors are returned to the caller for retry logic.
+func runEventLoop(
 	ctx context.Context,
 	cli DockerClient,
 	hf *hostfile.Hostfile,
+	wm *writeManager,
 	cfg Config,
 ) error {
-	// Create write manager
-	wm := newWriteManager(ctx, hf, cfg.UpdateCommand, cfg.MinimumUpdateInterval)
-
-	// Ensure pending writes are flushed on exit
-	defer func() {
-		if err := wm.flush(); err != nil {
-			log.Printf("ERROR: failed to flush pending writes: %v", err)
-		}
-	}()
-
-	// Sync all currently running containers
-	if err := syncRunningContainers(ctx, cli, hf, wm, cfg.Domain, cfg.MultiNet); err != nil {
-		return fmt.Errorf("failed to sync running containers: %w", err)
-	}
-
 	// Get event stream
 	filters := client.Filters{}
 	filters.Add("type", "container")
@@ -396,24 +383,66 @@ func Run(
 			case "start":
 				err = handleContainerStart(ctx, cli, hf, wm, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
 				if err != nil {
-					log.Fatalf("ERROR: %v", err)
+					log.Printf("ERROR: handling container start: %v (will resync on reconnection)", err)
+					// Continue processing events - don't kill daemon for single container failure
 				}
 
 			case "die":
 				err = handleContainerDie(ctx, cli, hf, wm, msg.Actor.ID, name, cfg.Domain, cfg.MultiNet)
 				if err != nil {
-					log.Fatalf("ERROR: %v", err)
+					log.Printf("ERROR: handling container die: %v", err)
+					// Continue processing events - don't kill daemon for single container failure
 				}
 			}
 
 		case err := <-result.Err:
+			// Event stream error - will be retried by outer loop
 			if err == io.EOF {
 				return fmt.Errorf("event stream closed")
 			}
 			return fmt.Errorf("error receiving event: %w", err)
 
 		case <-ctx.Done():
-			return nil // Clean shutdown
+			// Clean shutdown requested
+			return ctx.Err()
 		}
 	}
+}
+
+// Run orchestrates the event loop and container syncing with automatic retry on connection failures.
+func Run(
+	ctx context.Context,
+	cli DockerClient,
+	hf *hostfile.Hostfile,
+	cfg Config,
+) error {
+	// Create write manager
+	wm := newWriteManager(ctx, hf, cfg.UpdateCommand, cfg.MinimumUpdateInterval)
+
+	// Ensure pending writes are flushed on exit
+	defer func() {
+		if err := wm.flush(); err != nil {
+			log.Printf("ERROR: failed to flush pending writes: %v", err)
+		}
+	}()
+
+	// Initial sync with retry
+	retryCfg := DefaultRetryConfig()
+	err := RetryWithBackoff(ctx, retryCfg, "initial sync", func() error {
+		return syncRunningContainers(ctx, cli, hf, wm, cfg.Domain, cfg.MultiNet)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync running containers: %w", err)
+	}
+
+	// Infinite retry loop for event stream
+	return RetryWithBackoff(ctx, retryCfg, "event stream", func() error {
+		// Resync on each reconnection to catch containers started/stopped during downtime
+		if err := syncRunningContainers(ctx, cli, hf, wm, cfg.Domain, cfg.MultiNet); err != nil {
+			return fmt.Errorf("failed to resync running containers: %w", err)
+		}
+
+		// Run event loop until error
+		return runEventLoop(ctx, cli, hf, wm, cfg)
+	})
 }

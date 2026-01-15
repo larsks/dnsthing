@@ -66,9 +66,20 @@ func main() {
 		os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Create Docker client
-	cli, err := client.New(client.FromEnv)
+	// Create Docker client with retry
+	var cli *client.Client
+	err := eventclient.RetryWithBackoff(
+		ctx,
+		eventclient.DefaultRetryConfig(),
+		"create Docker client",
+		func() error {
+			var err error
+			cli, err = client.New(client.FromEnv)
+			return err
+		},
+	)
 	if err != nil {
+		// Only reached on context cancellation
 		log.Fatalf("error creating Docker client: %v", err)
 	}
 	defer cli.Close()
