@@ -24,9 +24,11 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -110,6 +112,10 @@ func (hf *Hostfile) LookupHost(name string) (string, error) {
 		return "", fmt.Errorf("host not found: %s", name)
 	}
 	return address, nil
+}
+
+func (hf *Hostfile) ListHostnames() []string {
+	return slices.Collect(maps.Keys(hf.hosts))
 }
 
 // Read reads the hosts file from disk and loads the entries into memory.
