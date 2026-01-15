@@ -23,6 +23,7 @@ package hostfile
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -213,6 +214,7 @@ func (hf *Hostfile) Write() error {
 	}
 
 	// Atomic rename
+	log.Printf("updating %s", hf.path)
 	if err := os.Rename(tmpPath, hf.path); err != nil {
 		// Clean up on rename failure
 		os.Remove(tmpPath) //nolint:errcheck
